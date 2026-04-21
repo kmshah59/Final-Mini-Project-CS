@@ -18,10 +18,13 @@ Dependencies:
 import os
 import sys
 import shutil
+import time
 import tempfile
+import tracemalloc
 import hashlib
 import getpass
 
+import psutil
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from Crypto.Cipher import DES3
@@ -115,17 +118,31 @@ def encrypt(password: str, path: str) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Image file not found: {path}")
 
+    process = psutil.Process(os.getpid())
+    mem_before = process.memory_info().rss
+    tracemalloc.start()
+    cpu_times_start = process.cpu_times()
+    t_total_start = time.perf_counter()
+
     # Read the original image data
     with open(path, "rb") as f:
         plaintext = f.read()
 
+    file_size = len(plaintext)
+
     # Generate fresh cryptographic material
     salt = get_random_bytes(SALT_SIZE)
+
+    t_kdf_start = time.perf_counter()
     key = derive_key(password, salt)
+    t_kdf_end = time.perf_counter()
+
     cipher = DES3.new(key, DES3.MODE_EAX, nonce=get_random_bytes(NONCE_SIZE))
 
     # Encrypt and produce the authentication tag
+    t_enc_start = time.perf_counter()
     ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+    t_enc_end = time.perf_counter()
 
     # Build the output blob: SALT | NONCE | TAG | CIPHERTEXT
     output_data = salt + cipher.nonce + tag + ciphertext
@@ -145,10 +162,49 @@ def encrypt(password: str, path: str) -> str:
             os.remove(tmp_path)
         raise
 
+    t_total_end = time.perf_counter()
+
+    # --- Resource usage ---
+    cpu_times_end = process.cpu_times()
+    mem_after = process.memory_info().rss
+    _, mem_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    cpu_user = cpu_times_end.user - cpu_times_start.user
+    cpu_system = cpu_times_end.system - cpu_times_start.system
+    cpu_total = cpu_user + cpu_system
+    wall_time = t_total_end - t_total_start
+    # CPU usage % = (CPU time used / wall time) * 100, capped at nCPUs * 100
+    cpu_percent = (cpu_total / wall_time * 100) if wall_time > 0 else 0.0
+
+    mem_used_mb = mem_after / (1024 * 1024)
+    mem_peak_mb = mem_peak / (1024 * 1024)
+
+    # --- Performance metrics ---
+    kdf_time = t_kdf_end - t_kdf_start
+    enc_time = t_enc_end - t_enc_start
+    total_time = t_total_end - t_total_start
+    size_mb = file_size / (1024 * 1024)
+    throughput = size_mb / enc_time if enc_time > 0 else float("inf")
+
     print(f"[+] Encryption successful: {path}")
     print(f"    Salt   : {salt.hex()}")
     print(f"    Nonce  : {cipher.nonce.hex()}")
     print(f"    Tag    : {tag.hex()}")
+    print()
+    print(f"    --- Performance ---")
+    print(f"    File size          : {file_size:,} bytes ({size_mb:.2f} MB)")
+    print(f"    Key derivation     : {kdf_time:.4f} s")
+    print(f"    Encryption         : {enc_time:.4f} s")
+    print(f"    Total time         : {total_time:.4f} s")
+    print(f"    Encryption speed   : {throughput:.2f} MB/s")
+    print()
+    print(f"    --- Resource Usage ---")
+    print(f"    CPU usage          : {cpu_percent:.1f}%")
+    print(f"    CPU time (user)    : {cpu_user:.4f} s")
+    print(f"    CPU time (system)  : {cpu_system:.4f} s")
+    print(f"    Memory (current)   : {mem_used_mb:.2f} MB")
+    print(f"    Memory (peak alloc): {mem_peak_mb:.2f} MB")
     return path
 
 
@@ -179,6 +235,12 @@ def decrypt(password: str, path: str) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Encrypted file not found: {path}")
 
+    process = psutil.Process(os.getpid())
+    mem_before = process.memory_info().rss
+    tracemalloc.start()
+    cpu_times_start = process.cpu_times()
+    t_total_start = time.perf_counter()
+
     with open(path, "rb") as f:
         data = f.read()
 
@@ -192,11 +254,17 @@ def decrypt(password: str, path: str) -> str:
     tag = data[SALT_SIZE + NONCE_SIZE : header_size]
     ciphertext = data[header_size:]
 
+    file_size = len(ciphertext)
+
     # Re-derive the same key
+    t_kdf_start = time.perf_counter()
     key = derive_key(password, salt)
+    t_kdf_end = time.perf_counter()
+
     cipher = DES3.new(key, DES3.MODE_EAX, nonce=nonce)
 
     # Decrypt and verify the authentication tag
+    t_dec_start = time.perf_counter()
     try:
         plaintext = cipher.decrypt_and_verify(ciphertext, tag)
     except ValueError:
@@ -204,6 +272,7 @@ def decrypt(password: str, path: str) -> str:
             "Authentication failed! The password is incorrect or the "
             "file has been tampered with. The encrypted file is unchanged."
         )
+    t_dec_end = time.perf_counter()
 
     # Safe write: write to a temp file first, then replace
     dir_name = os.path.dirname(os.path.abspath(path))
@@ -218,7 +287,45 @@ def decrypt(password: str, path: str) -> str:
             os.remove(tmp_path)
         raise
 
+    t_total_end = time.perf_counter()
+
+    # --- Resource usage ---
+    cpu_times_end = process.cpu_times()
+    mem_after = process.memory_info().rss
+    _, mem_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    cpu_user = cpu_times_end.user - cpu_times_start.user
+    cpu_system = cpu_times_end.system - cpu_times_start.system
+    cpu_total = cpu_user + cpu_system
+    wall_time = t_total_end - t_total_start
+    cpu_percent = (cpu_total / wall_time * 100) if wall_time > 0 else 0.0
+
+    mem_used_mb = mem_after / (1024 * 1024)
+    mem_peak_mb = mem_peak / (1024 * 1024)
+
+    # --- Performance metrics ---
+    kdf_time = t_kdf_end - t_kdf_start
+    dec_time = t_dec_end - t_dec_start
+    total_time = t_total_end - t_total_start
+    size_mb = file_size / (1024 * 1024)
+    throughput = size_mb / dec_time if dec_time > 0 else float("inf")
+
     print(f"[+] Decryption successful: {path}")
+    print()
+    print(f"    --- Performance ---")
+    print(f"    File size          : {file_size:,} bytes ({size_mb:.2f} MB)")
+    print(f"    Key derivation     : {kdf_time:.4f} s")
+    print(f"    Decryption         : {dec_time:.4f} s")
+    print(f"    Total time         : {total_time:.4f} s")
+    print(f"    Decryption speed   : {throughput:.2f} MB/s")
+    print()
+    print(f"    --- Resource Usage ---")
+    print(f"    CPU usage          : {cpu_percent:.1f}%")
+    print(f"    CPU time (user)    : {cpu_user:.4f} s")
+    print(f"    CPU time (system)  : {cpu_system:.4f} s")
+    print(f"    Memory (current)   : {mem_used_mb:.2f} MB")
+    print(f"    Memory (peak alloc): {mem_peak_mb:.2f} MB")
     return path
 
 
