@@ -100,7 +100,7 @@ def derive_ecc_key(password: str, salt: bytes):
         salt,
         dkLen=32,
         count=KDF_ITERATIONS,
-        prf=lambda p, s: HMAC.new(p, s, SHA256).digest(),
+        hmac_hash_module=SHA256,
     )
     # Convert to a valid private scalar in [1, n-1]
     d = int.from_bytes(key_bytes, "big") % P256_ORDER

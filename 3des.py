@@ -84,7 +84,7 @@ def derive_key(password: str, salt: bytes) -> bytes:
         salt,
         dkLen=KEY_SIZE,
         count=KDF_ITERATIONS,
-        prf=lambda p, s: HMAC.new(p, s, SHA256).digest(),
+        hmac_hash_module=SHA256,
     )
 
     # DES3 requires that the three 8-byte sub-keys are not all identical.
